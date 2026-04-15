@@ -7,10 +7,10 @@
 --model: DCASE2023T2-AE
 --score: MSE
 --seed: 13711
---is_auto_download: False
+--is_auto_download: True
 
 --max_fpr: 0.1
---decision_threshold: 0.9
+--decision_threshold: 0.90
 
 # feature
 --n_mels: 128

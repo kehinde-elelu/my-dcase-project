@@ -31,12 +31,6 @@ if [ "${dev_eval}" = "-d" ] || [ "${dev_eval}" = "--dev" ]
 then
     dataset_list="\
         DCASE2026T2ToyCar \
-        DCASE2026T2ToyCarEmu \
-        DCASE2026T2bearingEmu \
-        DCASE2026T2fan \
-        DCASE2026T2gearboxEmu \
-        DCASE2026T2sliderEmu \
-        DCASE2026T2valveEmu \
     "
 elif [ "${dev_eval}" = "-e" ] || [ "${dev_eval}" = "--eval" ]
 then

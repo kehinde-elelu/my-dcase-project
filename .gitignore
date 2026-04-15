@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda / env
+env/
+venv/
+*.conda
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+runs/
+exp/
+experiments/
+
+# DCASE outputs
+results/
+output/
+model/
+models/
+checkpoints/
+*.pth
+*.pt
+
+# Audio / datasets (VERY IMPORTANT)
+data/
+dataset/
+*.wav
+*.flac
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+
+# Large cache files
+*.npy
+*.npz
+
+*.wav
+*.png
+
