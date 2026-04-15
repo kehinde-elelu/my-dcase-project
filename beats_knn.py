@@ -17,7 +17,6 @@ from pathlib import Path
 
 import librosa
 import numpy as np
-import scipy
 import torch
 import torch.nn.functional as F
 from sklearn import metrics
@@ -164,6 +163,19 @@ def compute_knn_scores(train_embeddings, test_embeddings, k=2):
     return scores
 
 
+def compute_train_knn_scores(train_embeddings, k=2):
+    """
+    Compute kNN scores for training data using leave-one-out.
+    Fits with k+1 neighbors and drops the nearest (self-match).
+    """
+    nn = NearestNeighbors(n_neighbors=k + 1, metric="cosine", algorithm="brute")
+    nn.fit(train_embeddings)
+    distances, _ = nn.kneighbors(train_embeddings)
+    # Skip column 0 (distance to self = 0), use columns 1..k
+    scores = distances[:, 1:].mean(axis=1)
+    return scores
+
+
 def save_csv(filepath, data):
     """Save data to CSV."""
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
@@ -173,21 +185,17 @@ def save_csv(filepath, data):
 
 
 def evaluate_and_report(
-    y_true, y_pred, domain_list, decision_threshold_quantile,
-    filenames, dataset, section_id, result_dir, seed, max_fpr=0.1
+    y_true, y_pred, domain_list, train_scores,
+    filenames, dataset, section_id, result_dir, seed,
+    decision_threshold_quantile=0.9, max_fpr=0.1
 ):
     """Evaluate scores and save results (compatible with baseline format)."""
     section_name = f"section_{section_id}"
 
-    # Fit gamma distribution on training-like scores for thresholding
-    # Use normal test scores as proxy (since we don't have train scores at test time,
-    # we use the full score distribution)
-    shape_hat, loc_hat, scale_hat = scipy.stats.gamma.fit(
-        np.clip(y_pred, 1e-10, None)
-    )
-    decision_threshold = scipy.stats.gamma.ppf(
-        q=decision_threshold_quantile, a=shape_hat, loc=loc_hat, scale=scale_hat
-    )
+    # Percentile-based threshold on training kNN scores
+    # Training set is all normal, so the threshold captures the upper tail of normal distances
+    decision_threshold = np.percentile(train_scores, decision_threshold_quantile * 100)
+    print(f"Decision threshold (train {decision_threshold_quantile*100:.0f}th percentile): {decision_threshold:.6f}")
 
     # Save anomaly scores
     anomaly_score_list = [[fn, score] for fn, score in zip(filenames, y_pred)]
@@ -353,6 +361,11 @@ def main():
     print(f"\n============== kNN SCORING (k={args.k}) ==============")
     scores = compute_knn_scores(train_embeddings, test_embeddings, k=args.k)
 
+    # Compute training scores for percentile-based threshold
+    train_scores = compute_train_knn_scores(train_embeddings, k=args.k)
+    print(f"Train score range: [{train_scores.min():.6f}, {train_scores.max():.6f}]")
+    print(f"Train score 90th percentile: {np.percentile(train_scores, 90):.6f}")
+
     # Parse labels and domains from filenames
     y_true = []
     domain_list = []
@@ -373,12 +386,13 @@ def main():
         y_true=y_true,
         y_pred=scores,
         domain_list=domain_list,
-        decision_threshold_quantile=args.decision_threshold,
+        train_scores=train_scores,
         filenames=test_filenames,
         dataset=args.dataset,
         section_id=section_id,
         result_dir=result_dir,
         seed=args.seed,
+        decision_threshold_quantile=args.decision_threshold,
         max_fpr=args.max_fpr,
     )
 

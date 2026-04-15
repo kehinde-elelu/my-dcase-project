@@ -40,17 +40,17 @@ if [ ! -f "${BEATS_CKPT}" ]; then
         wget -q https://raw.githubusercontent.com/microsoft/unilm/master/beats/BEATs.py
         echo "Downloaded BEATs.py"
     fi
-    # Download pre-trained checkpoint
-    wget -q https://valle.blob.core.windows.net/share/BEATs/BEATs_iter3_plus_AS2M.pt
+    # Download pre-trained checkpoint (HuggingFace mirror)
+    wget -q "https://huggingface.co/lpepino/beats_ckpts/resolve/main/BEATs_iter3_plus_AS2M.pt"
     echo "Downloaded BEATs_iter3_plus_AS2M.pt"
     cd ..
 fi
 
-# Dataset list (same as baseline)
+# Dataset list
 dataset_list="DCASE2026T2ToyCar"
 
-# kNN parameters
-K=2
+# kNN parameters (k=1 cosine gives best balanced source/target AUC)
+K=1
 
 for dataset in $dataset_list; do
     echo ""
