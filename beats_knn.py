@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn import metrics
+from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm
 
@@ -29,7 +30,7 @@ from tqdm import tqdm
 # ============================================================
 
 def load_beats_model(checkpoint_path, device):
-    """Load BEATs pre-trained model from checkpoint."""
+    """Load BEATs pre-trained or fine-tuned model from checkpoint."""
     # Import BEATs (cloned repo must be on sys.path)
     beats_dir = Path(__file__).parent / "BEATs"
     if str(beats_dir) not in sys.path:
@@ -37,9 +38,19 @@ def load_beats_model(checkpoint_path, device):
     from BEATs import BEATs, BEATsConfig
 
     ckpt = torch.load(checkpoint_path, map_location=device)
-    cfg = BEATsConfig(ckpt["cfg"])
-    model = BEATs(cfg)
-    model.load_state_dict(ckpt["model"])
+
+    # Detect fine-tuned checkpoint (saved by finetune_beats.py)
+    if "beats_state_dict" in ckpt:
+        cfg = BEATsConfig(ckpt["cfg"])
+        model = BEATs(cfg)
+        model.load_state_dict(ckpt["beats_state_dict"])
+        print(f"  (fine-tuned model, epoch {ckpt.get('epoch', '?')}, "
+              f"loss {ckpt.get('loss', '?'):.4f})")
+    else:
+        cfg = BEATsConfig(ckpt["cfg"])
+        model = BEATs(cfg)
+        model.load_state_dict(ckpt["model"])
+
     model.eval()
     model.to(device)
     return model
@@ -123,6 +134,7 @@ DATASET_TO_MACHINE = {
     "DCASE2026T2gearboxEmu": ("dcase2026t2", "gearboxEmu"),
     "DCASE2026T2sliderEmu": ("dcase2026t2", "sliderEmu"),
     "DCASE2026T2valveEmu": ("dcase2026t2", "valveEmu"),
+    "DCASE2026T2Generator": ("dcase2026t2", "Generator"),
 }
 
 
@@ -163,17 +175,64 @@ def compute_knn_scores(train_embeddings, test_embeddings, k=2):
     return scores
 
 
-def compute_train_knn_scores(train_embeddings, k=2):
+def compute_mahalanobis_scores(train_embeddings, test_embeddings):
     """
-    Compute kNN scores for training data using leave-one-out.
-    Fits with k+1 neighbors and drops the nearest (self-match).
+    Compute Mahalanobis distance from the training distribution.
+    Uses Ledoit-Wolf shrinkage for robust covariance estimation
+    on high-dimensional (768-d) embeddings.
     """
-    nn = NearestNeighbors(n_neighbors=k + 1, metric="cosine", algorithm="brute")
-    nn.fit(train_embeddings)
-    distances, _ = nn.kneighbors(train_embeddings)
-    # Skip column 0 (distance to self = 0), use columns 1..k
-    scores = distances[:, 1:].mean(axis=1)
+    mean = train_embeddings.mean(axis=0)
+    cov_estimator = LedoitWolf().fit(train_embeddings)
+    precision = cov_estimator.get_precision()
+
+    diff = test_embeddings - mean
+    # Mahalanobis: sqrt( (x-mu)^T @ precision @ (x-mu) )
+    scores = np.sqrt(np.sum(diff @ precision * diff, axis=1))
     return scores
+
+
+def normalize_scores(scores):
+    """Min-max normalize scores to [0, 1]."""
+    s_min, s_max = scores.min(), scores.max()
+    if s_max - s_min < 1e-12:
+        return np.zeros_like(scores)
+    return (scores - s_min) / (s_max - s_min)
+
+
+def compute_calibration_scores(train_embeddings, k=2, scoring="knn",
+                               cal_ratio=0.1, seed=42):
+    """
+    Compute calibration scores by splitting training data into
+    fit set (90%) and calibration set (10%). Scoring the calibration
+    set against the fit set simulates how unseen normal data behaves
+    at inference, producing a properly calibrated threshold.
+    """
+    rng = np.random.RandomState(seed)
+    n = len(train_embeddings)
+    n_cal = max(int(n * cal_ratio), k + 1)
+    indices = rng.permutation(n)
+    cal_idx = indices[:n_cal]
+    fit_idx = indices[n_cal:]
+
+    fit_emb = train_embeddings[fit_idx]
+    cal_emb = train_embeddings[cal_idx]
+
+    if scoring == "knn":
+        nn = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute")
+        nn.fit(fit_emb)
+        distances, _ = nn.kneighbors(cal_emb)
+        return distances.mean(axis=1)
+    elif scoring == "mahalanobis":
+        return compute_mahalanobis_scores(fit_emb, cal_emb)
+    elif scoring == "ensemble":
+        nn = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute")
+        nn.fit(fit_emb)
+        distances, _ = nn.kneighbors(cal_emb)
+        knn_scores = distances.mean(axis=1)
+        maha_scores = compute_mahalanobis_scores(fit_emb, cal_emb)
+        return normalize_scores(knn_scores) + normalize_scores(maha_scores)
+    else:
+        raise ValueError(f"Unknown scoring: {scoring}")
 
 
 def save_csv(filepath, data):
@@ -298,6 +357,9 @@ def main():
                         help="Path to BEATs checkpoint")
     parser.add_argument("--k", type=int, default=2,
                         help="Number of nearest neighbors (default: 2)")
+    parser.add_argument("--scoring", type=str, default="ensemble",
+                        choices=["knn", "mahalanobis", "ensemble"],
+                        help="Scoring method (default: ensemble)")
     parser.add_argument("--seed", type=int, default=13711,
                         help="Random seed (for result file naming)")
     parser.add_argument("--data_dir", type=str, default="./data",
@@ -314,7 +376,7 @@ def main():
 
     print(f"BEATs + kNN Anomaly Detection")
     print(f"Dataset: {args.dataset}")
-    print(f"k = {args.k}")
+    print(f"k = {args.k}, scoring = {args.scoring}")
     print(f"BEATs checkpoint: {args.beats_ckpt}")
     print()
 
@@ -357,14 +419,27 @@ def main():
     )
     print(f"Test embeddings shape: {test_embeddings.shape}")
 
-    # ============== kNN scoring ==============
-    print(f"\n============== kNN SCORING (k={args.k}) ==============")
-    scores = compute_knn_scores(train_embeddings, test_embeddings, k=args.k)
+    # ============== SCORING ==============
+    print(f"\n============== SCORING (method={args.scoring}, k={args.k}) ==============")
+    if args.scoring == "knn":
+        scores = compute_knn_scores(train_embeddings, test_embeddings, k=args.k)
+    elif args.scoring == "mahalanobis":
+        scores = compute_mahalanobis_scores(train_embeddings, test_embeddings)
+    elif args.scoring == "ensemble":
+        knn_scores = compute_knn_scores(train_embeddings, test_embeddings, k=args.k)
+        maha_scores = compute_mahalanobis_scores(train_embeddings, test_embeddings)
+        print(f"  kNN  range: [{knn_scores.min():.6f}, {knn_scores.max():.6f}]")
+        print(f"  Maha range: [{maha_scores.min():.4f}, {maha_scores.max():.4f}]")
+        scores = normalize_scores(knn_scores) + normalize_scores(maha_scores)
 
-    # Compute training scores for percentile-based threshold
-    train_scores = compute_train_knn_scores(train_embeddings, k=args.k)
-    print(f"Train score range: [{train_scores.min():.6f}, {train_scores.max():.6f}]")
-    print(f"Train score 90th percentile: {np.percentile(train_scores, 90):.6f}")
+    print(f"Test score range: [{scores.min():.6f}, {scores.max():.6f}]")
+
+    # Compute calibration scores for threshold (fit/cal split)
+    cal_scores = compute_calibration_scores(
+        train_embeddings, k=args.k, scoring=args.scoring, seed=args.seed
+    )
+    print(f"Cal  score range: [{cal_scores.min():.6f}, {cal_scores.max():.6f}]")
+    print(f"Cal  90th percentile: {np.percentile(cal_scores, 90):.6f}")
 
     # Parse labels and domains from filenames
     y_true = []
@@ -386,7 +461,7 @@ def main():
         y_true=y_true,
         y_pred=scores,
         domain_list=domain_list,
-        train_scores=train_scores,
+        train_scores=cal_scores,
         filenames=test_filenames,
         dataset=args.dataset,
         section_id=section_id,

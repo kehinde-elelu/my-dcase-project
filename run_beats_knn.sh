@@ -47,7 +47,8 @@ if [ ! -f "${BEATS_CKPT}" ]; then
 fi
 
 # Dataset list
-dataset_list="DCASE2026T2ToyCar"
+# dataset_list="DCASE2026T2ToyCar"
+dataset_list+=" DCASE2026T2Generator"
 
 # kNN parameters (k=1 cosine gives best balanced source/target AUC)
 K=1
@@ -62,8 +63,14 @@ for dataset in $dataset_list; do
         ${DEV_FLAG} \
         --beats_ckpt=${BEATS_CKPT} \
         --k=${K} \
+        --scoring=ensemble \
         --decision_threshold=0.9
 done
+
+# mahalanobis
+# ensemble
+# knn
+
 
 echo ""
 echo "========================================"

@@ -106,6 +106,7 @@ class DCASE202XT2(object):
 
 class Datasets:
     DatasetsDic = {
+        'DCASE2026T2Generator':DCASE202XT2,
         'DCASE2026T2valveEmu':DCASE202XT2,
         'DCASE2026T2sliderEmu':DCASE202XT2,
         'DCASE2026T2gearboxEmu':DCASE202XT2,
