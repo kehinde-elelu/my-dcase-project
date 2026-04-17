@@ -51,7 +51,7 @@ fi
 dataset_list+=" DCASE2026T2Generator"
 
 # kNN parameters (k=1 cosine gives best balanced source/target AUC)
-K=1
+K=5
 
 for dataset in $dataset_list; do
     echo ""
@@ -63,7 +63,7 @@ for dataset in $dataset_list; do
         ${DEV_FLAG} \
         --beats_ckpt=${BEATS_CKPT} \
         --k=${K} \
-        --scoring=ensemble \
+        --scoring=mahalanobis \
         --decision_threshold=0.9
 done
 

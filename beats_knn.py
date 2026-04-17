@@ -102,16 +102,32 @@ def parse_filename(filepath):
     Parse DCASE filename to extract metadata.
 
     Example: section_00_source_test_normal_0002_noAttribute.wav
-    Returns: (section_id, domain, split, label, index)
+    Returns: (section_id, domain, split, label, special_type)
     """
     name = Path(filepath).stem
     parts = name.split("_")
-    # section_00_source_test_normal_0002_noAttribute
-    section_id = parts[1]  # "00"
-    domain = parts[2]      # "source" or "target"
-    split = parts[3]       # "train" or "test"
-    label = parts[4]       # "normal" or "anomaly"
-    return section_id, domain, split, label
+    # Find label
+    label = None
+    for p in parts:
+        if p in ("normal", "anomaly", "generator", "compressor"):
+            label = p
+            break
+    # Find domain
+    domain = None
+    for p in parts:
+        if p in ("source", "target"):
+            domain = p
+            break
+    section_id = parts[1] if len(parts) > 1 else "00"
+    split = parts[3] if len(parts) > 3 else "test"
+    # Find special type
+    if "loaded" in parts:
+        special_type = "loaded_generator"
+    elif "unloaded" in parts:
+        special_type = "unloaded_generator"
+    else:
+        special_type = None
+    return section_id, domain, split, label, special_type
 
 
 def load_audio_mono(filepath, channel=0):
@@ -221,9 +237,11 @@ def compute_calibration_scores(train_embeddings, k=2, scoring="knn",
         nn = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute")
         nn.fit(fit_emb)
         distances, _ = nn.kneighbors(cal_emb)
-        return distances.mean(axis=1)
+        # return distances.mean(axis=1)
+        return normalize_scores(distances.mean(axis=1))
     elif scoring == "mahalanobis":
-        return compute_mahalanobis_scores(fit_emb, cal_emb)
+        # return compute_mahalanobis_scores(fit_emb, cal_emb)
+        return normalize_scores(compute_mahalanobis_scores(fit_emb, cal_emb))
     elif scoring == "ensemble":
         nn = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute")
         nn.fit(fit_emb)
@@ -288,24 +306,36 @@ def evaluate_and_report(
     y_true_t = y_true[target_mask]
     y_pred_t = y_pred[target_mask]
 
-    auc_s = metrics.roc_auc_score(y_true[s_auc_mask], y_pred[s_auc_mask])
-    auc_t = metrics.roc_auc_score(y_true[t_auc_mask], y_pred[t_auc_mask])
-    p_auc = metrics.roc_auc_score(y_true, y_pred, max_fpr=max_fpr)
-    p_auc_s = metrics.roc_auc_score(y_true_s, y_pred_s, max_fpr=max_fpr)
-    p_auc_t = metrics.roc_auc_score(y_true_t, y_pred_t, max_fpr=max_fpr)
+    if np.any(source_mask):
+        auc_s = metrics.roc_auc_score(y_true[s_auc_mask], y_pred[s_auc_mask])
+        p_auc_s = metrics.roc_auc_score(y_true_s, y_pred_s, max_fpr=max_fpr)
+        dec_s = [1 if x > decision_threshold else 0 for x in y_pred_s]
+        tn_s, fp_s, fn_s, tp_s = metrics.confusion_matrix(y_true_s, dec_s).ravel()
+        prec_s = tp_s / max(tp_s + fp_s, sys.float_info.epsilon)
+        recall_s = tp_s / max(tp_s + fn_s, sys.float_info.epsilon)
+        f1_s = 2.0 * prec_s * recall_s / max(prec_s + recall_s, sys.float_info.epsilon)
+    else:
+        print("No source domain files found. Skipping source metrics.")
+        auc_s = p_auc_s = prec_s = recall_s = f1_s = float('nan')
 
-    # Precision, recall, F1 per domain
-    dec_s = [1 if x > decision_threshold else 0 for x in y_pred_s]
-    tn_s, fp_s, fn_s, tp_s = metrics.confusion_matrix(y_true_s, dec_s).ravel()
-    prec_s = tp_s / max(tp_s + fp_s, sys.float_info.epsilon)
-    recall_s = tp_s / max(tp_s + fn_s, sys.float_info.epsilon)
-    f1_s = 2.0 * prec_s * recall_s / max(prec_s + recall_s, sys.float_info.epsilon)
+    if np.any(target_mask):
+        auc_t = metrics.roc_auc_score(y_true[t_auc_mask], y_pred[t_auc_mask])
+        p_auc_t = metrics.roc_auc_score(y_true_t, y_pred_t, max_fpr=max_fpr)
+        dec_t = [1 if x > decision_threshold else 0 for x in y_pred_t]
+        tn_t, fp_t, fn_t, tp_t = metrics.confusion_matrix(y_true_t, dec_t).ravel()
+        prec_t = tp_t / max(tp_t + fp_t, sys.float_info.epsilon)
+        recall_t = tp_t / max(tp_t + fn_t, sys.float_info.epsilon)
+        f1_t = 2.0 * prec_t * recall_t / max(prec_t + recall_t, sys.float_info.epsilon)
+    else:
+        print("No target domain files found. Skipping target metrics.")
+        auc_t = p_auc_t = prec_t = recall_t = f1_t = float('nan')
 
-    dec_t = [1 if x > decision_threshold else 0 for x in y_pred_t]
-    tn_t, fp_t, fn_t, tp_t = metrics.confusion_matrix(y_true_t, dec_t).ravel()
-    prec_t = tp_t / max(tp_t + fp_t, sys.float_info.epsilon)
-    recall_t = tp_t / max(tp_t + fn_t, sys.float_info.epsilon)
-    f1_t = 2.0 * prec_t * recall_t / max(prec_t + recall_t, sys.float_info.epsilon)
+    # Compute overall pAUC if both classes are present
+    if len(np.unique(y_true)) > 1:
+        p_auc = metrics.roc_auc_score(y_true, y_pred, max_fpr=max_fpr)
+        auc = metrics.roc_auc_score(y_true, y_pred)
+    else:
+        p_auc = auc = float('nan')
 
     print(f"AUC (source) : {auc_s}")
     print(f"AUC (target) : {auc_t}")
@@ -422,9 +452,11 @@ def main():
     # ============== SCORING ==============
     print(f"\n============== SCORING (method={args.scoring}, k={args.k}) ==============")
     if args.scoring == "knn":
-        scores = compute_knn_scores(train_embeddings, test_embeddings, k=args.k)
+        knn_scores = compute_knn_scores(train_embeddings, test_embeddings, k=args.k)
+        scores = normalize_scores(knn_scores)
     elif args.scoring == "mahalanobis":
-        scores = compute_mahalanobis_scores(train_embeddings, test_embeddings)
+        maha_scores = compute_mahalanobis_scores(train_embeddings, test_embeddings)
+        scores = normalize_scores(maha_scores)
     elif args.scoring == "ensemble":
         knn_scores = compute_knn_scores(train_embeddings, test_embeddings, k=args.k)
         maha_scores = compute_mahalanobis_scores(train_embeddings, test_embeddings)
@@ -446,8 +478,12 @@ def main():
     domain_list = []
     section_id = None
     for fn in test_filenames:
-        sid, domain, split, label = parse_filename(fn)
-        y_true.append(1 if label == "anomaly" else 0)
+        sid, domain, split, label, special_type = parse_filename(fn)
+        # print(sid, domain, split, label, special_type)
+        # Treat "compressor" as anomaly, "generator" as normal
+        # y_true.append(1 if label in ("anomaly", "compressor") else 0)
+        y_true.append(1 if (special_type == "loaded_generator" or label == "anomaly") else 0)
+        # print(y_true[-1], label, fn)
         domain_list.append(domain)
         if section_id is None:
             section_id = sid
